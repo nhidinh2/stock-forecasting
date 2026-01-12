@@ -1,0 +1,651 @@
+---
+title: "Time Series Analysis: Stock Data"
+author: "Nhi Dinh"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6,
+  fig.align = "center"
+)
+```
+
+# Introduction
+
+This document performs a comprehensive time series analysis of stock data, following these steps:
+
+- **Step 0**: Load and clean data, check trading days
+- **Step 1**: Confirm non-stationarity with diagnostic plots
+- **Part A**: Regression analysis with stationary transformations
+
+```{r libraries}
+# Load required libraries
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(forecast)
+library(lmtest)
+library(tseries)
+library(zoo)
+library(lubridate)
+library(knitr)
+```
+
+# Step 0: Load + Clean
+
+## Load and Clean Data
+
+```{r load-clean-functions}
+# Load and clean data function
+load_and_clean_data <- function(file_path) {
+  # Read CSV file (skip second row if it contains currency info)
+  data <- read.csv(file_path, stringsAsFactors = FALSE)
+  
+  # Remove second row if it looks like a header row
+  if (nrow(data) > 1 && grepl("BTC-USD|USD", data[1, 2], ignore.case = TRUE)) {
+    data <- data[-1, ]
+  }
+  
+  # Parse Date as datetime
+  data$Date <- as.Date(data$Date, format = "%Y-%m-%d")
+  
+  # Convert numeric columns
+  data$Close <- as.numeric(data$Close)
+  data$Open <- as.numeric(data$Open)
+  data$High <- as.numeric(data$High)
+  data$Low <- as.numeric(data$Low)
+  data$Volume <- as.numeric(data$Volume)
+  
+  # Sort ascending by date
+  data <- data %>% arrange(Date)
+  
+  # Drop duplicates (keep first occurrence)
+  data <- data %>% distinct(Date, .keep_all = TRUE)
+  
+  # Remove rows with missing values
+  data <- data %>% filter(!is.na(Date), !is.na(Close), !is.na(Volume))
+  
+  return(data)
+}
+```
+
+## Check Trading Days
+
+```{r trading-days-functions}
+check_trading_days <- function(data) {
+  # Extract weekday (1 = Monday, 7 = Sunday)
+  data$Weekday <- wday(data$Date, week_start = 1)
+  
+  # Check if weekends exist
+  has_weekends <- any(data$Weekday %in% c(6, 7))  # Saturday = 6, Sunday = 7
+  
+  # Count days
+  total_days <- nrow(data)
+  weekend_count <- sum(data$Weekday %in% c(6, 7))
+  
+  result <- list(
+    has_weekends = has_weekends,
+    total_days = total_days,
+    weekend_count = weekend_count
+  )
+  
+  return(result)
+}
+```
+
+## Execute Step 0
+
+```{r step0-execute}
+# Set the CSV file path (modify as needed)
+csv_file <- "archive/bitcoin.csv"
+
+# Load and clean data
+data <- load_and_clean_data(csv_file)
+
+# Check trading days
+check_trading_days(data)
+```
+
+## Plot: Close Price and Volume
+
+```{r step0-plot}
+# Plot Close and Volume over time
+p1 <- ggplot(data, aes(x = Date, y = Close)) +
+  geom_line(color = "steelblue", linewidth = 0.8) +
+  labs(title = "Close Price Over Time",
+       x = "Date", y = "Close Price") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+p2 <- ggplot(data, aes(x = Date, y = Volume)) +
+  geom_line(color = "darkgreen", linewidth = 0.8) +
+  labs(title = "Volume Over Time",
+       x = "Date", y = "Volume") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Combine plots
+grid.arrange(p1, p2, ncol = 1)
+```
+
+# Step 1: Confirm Non-Stationarity
+
+## Prepare Series
+
+We examine multiple series: Close, log(Close), Volume, log(Volume), and returns.
+
+```{r prepare-series}
+# Create series
+data$log_Close <- log(data$Close)
+data$log_Volume <- log(data$Volume)
+
+# Calculate returns
+data$returns <- c(NA, diff(data$log_Close))
+
+# Calculate volatility proxy (intraday range)
+data$volatility_proxy <- log(data$High / data$Low)
+
+# Remove first row (has NA for returns)
+data <- data[-1, ]
+```
+
+## Stationarity Diagnostics
+
+```{r stationarity-plot}
+# Define window for rolling statistics
+window <- min(60, floor(nrow(data) / 10))
+
+# Calculate rolling statistics
+data$Close_rolling_mean <- rollmean(data$Close, k = window, fill = NA, align = "right")
+data$Close_rolling_sd <- rollapply(data$Close, width = window, FUN = sd, fill = NA, align = "right")
+
+data$log_Close_rolling_mean <- rollmean(data$log_Close, k = window, fill = NA, align = "right")
+data$log_Close_rolling_sd <- rollapply(data$log_Close, width = window, FUN = sd, fill = NA, align = "right")
+
+data$log_Volume_rolling_mean <- rollmean(data$log_Volume, k = window, fill = NA, align = "right")
+data$log_Volume_rolling_sd <- rollapply(data$log_Volume, width = window, FUN = sd, fill = NA, align = "right")
+
+# Plot 1: Close Price with rolling statistics
+p1 <- ggplot(data, aes(x = Date)) +
+  geom_line(aes(y = Close), color = "steelblue", linewidth = 0.6) +
+  geom_line(aes(y = Close_rolling_mean), color = "red", linewidth = 1, linetype = "dashed", na.rm = TRUE) +
+  geom_ribbon(aes(ymin = Close_rolling_mean - Close_rolling_sd, 
+                  ymax = Close_rolling_mean + Close_rolling_sd), 
+              alpha = 0.2, fill = "red", na.rm = TRUE) +
+  labs(title = "Close Price with Rolling Mean ± SD (60-day window)",
+       x = "Date", y = "Close Price") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Plot 2: Log(Close) with rolling statistics
+p2 <- ggplot(data, aes(x = Date)) +
+  geom_line(aes(y = log_Close), color = "steelblue", linewidth = 0.6) +
+  geom_line(aes(y = log_Close_rolling_mean), color = "red", linewidth = 1, linetype = "dashed", na.rm = TRUE) +
+  geom_ribbon(aes(ymin = log_Close_rolling_mean - log_Close_rolling_sd, 
+                  ymax = log_Close_rolling_mean + log_Close_rolling_sd), 
+              alpha = 0.2, fill = "red", na.rm = TRUE) +
+  labs(title = "Log(Close) with Rolling Mean ± SD (60-day window)",
+       x = "Date", y = "Log(Close Price)") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Plot 3: ACF of Close
+acf_close <- acf(data$Close, plot = FALSE, na.action = na.pass)
+acf_df_close <- data.frame(Lag = acf_close$lag[,1,1], ACF = acf_close$acf[,1,1])
+p3 <- ggplot(acf_df_close, aes(x = Lag, y = ACF)) +
+  geom_bar(stat = "identity", fill = "steelblue", width = 0.5) +
+  geom_hline(yintercept = 0, color = "black") +
+  geom_hline(yintercept = c(-1.96/sqrt(length(data$Close)), 1.96/sqrt(length(data$Close))), 
+             linetype = "dashed", color = "red", alpha = 0.7) +
+  labs(title = "ACF of Close Price",
+       x = "Lag", y = "ACF") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Plot 4: ACF of Log(Close)
+acf_logclose <- acf(data$log_Close, plot = FALSE, na.action = na.pass)
+acf_df_logclose <- data.frame(Lag = acf_logclose$lag[,1,1], ACF = acf_logclose$acf[,1,1])
+p4 <- ggplot(acf_df_logclose, aes(x = Lag, y = ACF)) +
+  geom_bar(stat = "identity", fill = "steelblue", width = 0.5) +
+  geom_hline(yintercept = 0, color = "black") +
+  geom_hline(yintercept = c(-1.96/sqrt(length(data$log_Close)), 1.96/sqrt(length(data$log_Close))), 
+             linetype = "dashed", color = "red", alpha = 0.7) +
+  labs(title = "ACF of Log(Close Price)",
+       x = "Lag", y = "ACF") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Combine plots
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+## Stationarity Conclusion
+
+**Analysis Results:**
+
+- **Close Price**: trend + ACF near 1 → non-stationary
+- **Log(Close Price)**: trend + ACF near 1 → non-stationary
+**Solution**: model log returns ($\Delta \log$ price) for mean equations; consider (E)GARCH if volatility matters.
+
+## Testing Stationarity of r(t) (Log Returns)
+
+Now let's plot r(t) and perform formal statistical tests to confirm stationarity.
+
+### Plot of r(t)
+
+```{r plot-returns}
+# Plot log returns r(t)
+ggplot(data, aes(x = Date, y = returns)) +
+  geom_line(color = "steelblue", linewidth = 0.6) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed", alpha = 0.7) +
+  labs(title = "Log Returns r(t) = log(C_t) - log(C_{t-1})",
+       x = "Date", 
+       y = "Log Returns") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+- **Log Returns**: mean-reverting around ~0, variance changes over time → much closer to stationary (in mean), with volatility clustering
+
+### Statistical Tests for Stationarity
+
+We perform two complementary tests:
+
+1. **ADF (Augmented Dickey-Fuller) Test**: 
+   - H0: Series has a unit root (non-stationary)
+   - H1: Series is stationary
+   - Reject H0 (p-value < 0.05) → stationary
+
+2. **KPSS (Kwiatkowski-Phillips-Schmidt-Shin) Test**:
+   - H0: Series is stationary (trend-stationary)
+   - H1: Series has a unit root (non-stationary)
+   - Reject H0 (p-value < 0.05) → non-stationary
+
+```{r stationarity-tests}
+# ADF Test (Augmented Dickey-Fuller)
+# Test null hypothesis: series has unit root (non-stationary)
+adf.test(data$returns)
+
+# KPSS Test (Kwiatkowski-Phillips-Schmidt-Shin)
+# Test null hypothesis: series is stationary
+kpss.test(data$returns, null = "Trend")
+```
+Both tests show that r(t) is stationary, as well as the plot. The ADF test rejects the null hypothesis of a unit root (p-value < 0.05), and the KPSS test fails to reject the null hypothesis of stationarity (p-value > 0.05), confirming that log returns are stationary.
+
+# Part A: Regression Analysis
+
+## A1: Make Dependent Variable Stationary
+
+We use log returns as our dependent variable: $r_t = \log(C_t) - \log(C_{t-1})$
+
+```{r prepare-regression-data}
+prepare_regression_data <- function(data) {
+  # Create log returns (dependent variable)
+  data$log_returns <- c(NA, diff(log(data$Close)))
+  data$returns <- c(NA, diff(data$log_Close))
+
+  # Create regressors
+  # r_{t-1} (lagged return)
+  data$lag_return <- lag(data$log_returns, 1)
+  
+  # log(H_t / L_t) (intraday range = volatility proxy)
+  data$intraday_range <- log(data$High / data$Low)
+  
+  # Δlog(Volume_t) (volume change)
+  data$log_Volume <- log(data$Volume)
+  data$delta_log_Volume <- c(NA, diff(data$log_Volume))
+  
+  # log(O_t / C_{t-1}) (overnight gap)
+  data$lag_Close <- lag(data$Close, 1)
+  data$overnight_gap <- log(data$Open / data$lag_Close)
+  
+  # Weekday dummies (optional)
+  data$Weekday <- wday(data$Date, week_start = 1)  # 1 = Monday, 7 = Sunday
+  data$Monday <- as.numeric(data$Weekday == 1)
+  data$Tuesday <- as.numeric(data$Weekday == 2)
+  data$Wednesday <- as.numeric(data$Weekday == 3)
+  data$Thursday <- as.numeric(data$Weekday == 4)
+  data$Friday <- as.numeric(data$Weekday == 5)
+  
+  # Remove rows with NA values
+  data <- data %>% filter(!is.na(log_returns), 
+                          !is.na(lag_return),
+                          !is.na(delta_log_Volume),
+                          !is.na(intraday_range),
+                          !is.na(overnight_gap))
+  
+  return(data)
+}
+
+# Prepare regression data
+data_reg <- prepare_regression_data(data)
+```
+
+### Model 1: OLS Regression
+
+Model specification: $r_t = \beta_0 + \beta_1 r_{t-1} + \beta_2 \Delta\log(Vol_t) + \beta_3 \log(H_t/L_t) + \varepsilon_t$
+
+```{r model1}
+fit_model1 <- function(data) {
+  # Model: r_t = β₀ + β₁*r_{t-1} + β₂*Δlog(Vol_t) + β₃*log(H_t/L_t) + ε_t
+  model1 <- lm(log_returns ~ lag_return + delta_log_Volume + intraday_range, 
+               data = data)
+  
+  return(model1)
+}
+
+model1 <- fit_model1(data_reg)
+summary(model1)
+```
+
+### Check Residual ACF + Ljung-Box for Model 1
+
+```{r residuals-model1-check}
+# Extract residuals from Model 1
+residuals_m1 <- residuals(model1)
+
+# ACF of residuals
+acf_res_m1 <- acf(residuals_m1, plot = FALSE, na.action = na.pass)
+acf_df_res_m1 <- data.frame(Lag = acf_res_m1$lag[,1,1], ACF = acf_res_m1$acf[,1,1])
+p_acf_m1 <- ggplot(acf_df_res_m1, aes(x = Lag, y = ACF)) +
+  geom_bar(stat = "identity", fill = "steelblue", width = 0.5) +
+  geom_hline(yintercept = 0, color = "black") +
+  geom_hline(yintercept = c(-1.96/sqrt(length(residuals_m1)), 1.96/sqrt(length(residuals_m1))), 
+             linetype = "dashed", color = "red", alpha = 0.7) +
+  labs(title = "ACF of Residuals - Model 1 (OLS)",
+       x = "Lag", y = "ACF") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+p_acf_m1
+```
+
+#### PACF of Residuals
+
+```{r pacf-residuals-model1-check}
+# PACF of residuals
+pacf_res_m1 <- pacf(residuals_m1, plot = FALSE, na.action = na.pass)
+pacf_df_res_m1 <- data.frame(Lag = as.numeric(pacf_res_m1$lag), PACF = as.numeric(pacf_res_m1$acf))
+p_pacf_m1 <- ggplot(pacf_df_res_m1, aes(x = Lag, y = PACF)) +
+  geom_bar(stat = "identity", fill = "darkgreen", width = 0.5) +
+  geom_hline(yintercept = 0, color = "black") +
+  geom_hline(yintercept = c(-1.96/sqrt(length(residuals_m1)), 1.96/sqrt(length(residuals_m1))), 
+             linetype = "dashed", color = "red", alpha = 0.7) +
+  labs(title = "PACF of Residuals - Model 1 (OLS)",
+       x = "Lag", y = "PACF") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+p_pacf_m1
+```
+
+#### Ljung-Box Test Results
+
+```{r lb-test-model1-check, echo=FALSE}
+# Ljung-Box test
+Box.test(residuals_m1, lag = 10, type = "Ljung-Box")
+```
+
+**Interpretation:**
+
+Residual ACF is mostly near zero, but a small number of lags exceed the 95% bounds, indicating mild residual autocorrelation.
+
+Given the large sample size, even small correlations can be statistically significant; Ljung–Box confirms residuals are not perfectly white noise.
+
+**For forecasting**: upgrade to regression with ARMA errors / ARIMAX, because the residuals aren't fully independent.
+
+### Model 2: Regression with Seasonal ARIMA Errors
+
+Same regressors, but with ARMA(1,1) errors: $\varepsilon_t = \phi \varepsilon_{t-1} + \theta u_{t-1} + u_t$
+
+
+```{r model2}
+# Same regressors, but with ARMA errors
+
+# Convert log_returns to time series object
+# Use frequency=1 for daily data
+log_returns_ts <- ts(data_reg$log_returns, frequency = 1)
+
+xreg <- cbind(data_reg$lag_return, 
+              data_reg$delta_log_Volume, 
+              data_reg$intraday_range)
+colnames(xreg) <- c("lag_return", "delta_log_Volume", "intraday_range")
+
+# Fit ARIMA(1,0,1) with external regressors
+# order = c(1, 0, 1): AR(1) and MA(1)
+model2 <- Arima(log_returns_ts, 
+                order = c(2, 0, 2),
+                xreg = xreg,
+                method = "ML")
+
+model3 <- Arima(log_returns_ts, 
+                order = c(1, 0, 1),
+                xreg = xreg,
+                method = "ML")
+
+summmary(model2)
+residuals_m2 <- residuals(model2)
+
+Box.test(residuals_m2, lag = 10, type = "Ljung-Box")
+pacf(residuals_m1)
+
+AIC(model3, model2)
+BIC(model3, model2)
+
+```
+
+## A3: Residual Diagnostics
+
+### Model 1 Residual Diagnostics
+
+```{r residuals-model1}
+diagnose_residuals <- function(model, model_name, data) {
+  
+  if (inherits(model, "lm")) {
+    residuals <- residuals(model)
+  } else if (inherits(model, "Arima")) {
+    residuals <- residuals(model)
+  }
+  
+  # ACF of residuals
+  acf_res <- acf(residuals, plot = FALSE, na.action = na.pass)
+  acf_df_res <- data.frame(Lag = acf_res$lag[,1,1], ACF = acf_res$acf[,1,1])
+  p1 <- ggplot(acf_df_res, aes(x = Lag, y = ACF)) +
+    geom_bar(stat = "identity", fill = "steelblue", width = 0.5) +
+    geom_hline(yintercept = 0, color = "black") +
+    geom_hline(yintercept = c(-1.96/sqrt(length(residuals)), 1.96/sqrt(length(residuals))), 
+               linetype = "dashed", color = "red", alpha = 0.7) +
+    labs(title = paste("ACF of Residuals -", model_name),
+         x = "Lag", y = "ACF") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  # PACF of residuals
+  pacf_res <- pacf(residuals, plot = FALSE, na.action = na.pass)
+  pacf_df_res <- data.frame(Lag = as.numeric(pacf_res$lag), PACF = as.numeric(pacf_res$acf))
+  p2 <- ggplot(pacf_df_res, aes(x = Lag, y = PACF)) +
+    geom_bar(stat = "identity", fill = "darkgreen", width = 0.5) +
+    geom_hline(yintercept = 0, color = "black") +
+    geom_hline(yintercept = c(-1.96/sqrt(length(residuals)), 1.96/sqrt(length(residuals))), 
+               linetype = "dashed", color = "red", alpha = 0.7) +
+    labs(title = paste("PACF of Residuals -", model_name),
+         x = "Lag", y = "PACF") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  # Ljung-Box test
+  lb_test <- Box.test(residuals, lag = 10, type = "Ljung-Box")
+  
+  # Print diagnostic plots
+  print(grid.arrange(p1, p2, ncol = 2))
+  
+  return(list(acf_plot = p1, pacf_plot = p2, lb_test = lb_test))
+}
+
+# Diagnose Model 1 residuals
+diag1 <- diagnose_residuals(model1, "Model 1 (OLS)", data_reg)
+```
+
+#### Ljung-Box Test for Model 1
+
+```{r lb-test-model1, echo=FALSE}
+cat("**Ljung-Box Test for Residual Autocorrelation:**\n\n")
+cat(sprintf("- X-squared = %.4f\n", diag1$lb_test$statistic))
+cat(sprintf("- df = %d\n", diag1$lb_test$parameter))
+cat(sprintf("- p-value = %.4f\n\n", diag1$lb_test$p.value))
+
+if (diag1$lb_test$p.value < 0.05) {
+  cat("**→ Residuals show significant autocorrelation** (reject H0: no autocorrelation)\n")
+} else {
+  cat("**→ Residuals do not show significant autocorrelation** (fail to reject H0)\n")
+}
+```
+
+### Model 2 Residual Diagnostics
+
+```{r residuals-model2}
+# Diagnose Model 2 residuals
+diag2 <- diagnose_residuals(model2, "Model 2 (Seasonal ARIMA s=7)", data_reg)
+```
+
+#### Ljung-Box Test for Model 2
+
+```{r lb-test-model2, echo=FALSE}
+cat("**Ljung-Box Test for Residual Autocorrelation:**\n\n")
+cat(sprintf("- X-squared = %.4f\n", diag2$lb_test$statistic))
+cat(sprintf("- df = %d\n", diag2$lb_test$parameter))
+cat(sprintf("- p-value = %.4f\n\n", diag2$lb_test$p.value))
+
+if (diag2$lb_test$p.value < 0.05) {
+  cat("**→ Residuals show significant autocorrelation** (reject H0: no autocorrelation)\n")
+} else {
+  cat("**→ Residuals do not show significant autocorrelation** (fail to reject H0)\n")
+}
+```
+
+### Model Selection
+
+```{r model-selection}
+if (diag1$lb_test$p.value < 0.05) {
+  selected_model <- model2
+  selected_name <- "Model 2 (Seasonal ARIMA with s=7 and external regressors)"
+} else {
+  selected_model <- model1
+  selected_name <- "Model 1 (OLS)"
+}
+```
+
+```{r model-selection-text, echo=FALSE}
+if (diag1$lb_test$p.value < 0.05) {
+  cat("**Model Selection:** Model 1 residuals show autocorrelation → **Prefer Model 2 (Seasonal ARIMA with s=7)**\n")
+} else {
+  cat("**Model Selection:** Model 1 residuals do not show significant autocorrelation → **Model 1 (OLS) is adequate**\n")
+}
+```
+
+## A4: Forecast Next 5 Values
+
+```{r forecast}
+forecast_next5 <- function(model, data, model_name) {
+  
+  # Get last values for forecasting
+  last_date <- tail(data$Date, 1)
+  last_close <- tail(data$Close, 1)
+  last_return <- tail(data$log_returns, 1)
+  last_delta_vol <- tail(data$delta_log_Volume, 1)
+  last_intraday_range <- tail(data$intraday_range, 1)
+  
+  if (inherits(model, "lm")) {
+    # For OLS model, we need to forecast regressors first
+    # Simple approach: use last values or zero
+    # This is a limitation - in practice, you'd need to forecast regressors too
+    
+    # Create forecast dataframe
+    n_forecast <- 5
+    forecast_returns <- numeric(n_forecast)
+    forecast_dates <- last_date + 1:n_forecast
+    
+    # Use last observed values for regressors (simplified)
+    for (i in 1:n_forecast) {
+      newdata <- data.frame(
+        lag_return = ifelse(i == 1, last_return, forecast_returns[i-1]),
+        delta_log_Volume = last_delta_vol,  # Use last value (simplified)
+        intraday_range = last_intraday_range  # Use last value (simplified)
+      )
+      forecast_returns[i] <- predict(model, newdata = newdata)
+    }
+    
+    # Convert returns to prices
+    forecast_prices <- last_close * exp(cumsum(forecast_returns))
+    
+  } else if (inherits(model, "Arima")) {
+    # For ARIMA model with external regressors
+    # Need to provide future xreg values
+    # Simplified: use last values
+    n_forecast <- 5
+    xreg_future <- matrix(c(
+      rep(last_return, n_forecast),
+      rep(last_delta_vol, n_forecast),
+      rep(last_intraday_range, n_forecast)
+    ), ncol = 3)
+    colnames(xreg_future) <- c("lag_return", "delta_log_Volume", "intraday_range")
+    
+    forecast_obj <- forecast(model, h = n_forecast, xreg = xreg_future)
+    forecast_returns <- as.numeric(forecast_obj$mean)
+    
+    # Convert returns to prices
+    forecast_prices <- last_close * exp(cumsum(forecast_returns))
+    forecast_dates <- last_date + 1:n_forecast
+  }
+  
+  # Create forecast table
+  forecast_table <- data.frame(
+    Date = forecast_dates,
+    Forecast_Return = forecast_returns,
+    Forecast_Price = forecast_prices
+  )
+  
+  return(forecast_table)
+}
+
+# Generate forecasts
+forecasts <- forecast_next5(selected_model, data_reg, selected_name)
+```
+
+### Forecast Results
+
+```{r forecast-table, echo=FALSE}
+kable(forecasts, 
+      caption = paste("5-Step Ahead Forecasts using", selected_name),
+      digits = 4)
+```
+
+### Forecast Justification
+
+The final model was selected based on residual diagnostics. `r selected_name` was chosen because `r ifelse(inherits(selected_model, "Arima"), "it properly accounts for autocorrelation in the error term, making it more suitable for time series data.", "its residuals show no significant autocorrelation, making it adequate for this analysis.")`
+
+---
+
+# Summary
+
+This analysis demonstrates:
+
+1. **Data cleaning and exploration**: Proper handling of dates, duplicates, and trading day detection
+2. **Stationarity testing**: Visual and statistical confirmation that price levels are non-stationary
+3. **Model building**: Two regression approaches (OLS and Seasonal ARIMA with s=7 and external regressors) with proper transformation to stationary returns
+4. **Diagnostics**: Comprehensive residual analysis including ACF/PACF and Ljung-Box tests
+5. **Forecasting**: 5-step ahead forecasts for returns and prices
+
+The analysis properly handles non-stationary data by transforming to log returns before regression, avoiding spurious regression problems.
+
