@@ -1,8 +1,8 @@
-# Stock Forecasting: Time Series Analysis
+# Crypto Forecasting: Time Series Analysis
 
 A comprehensive time series analysis project for cryptocurrency price forecasting, featuring both **R** (RMarkdown) and **Python** implementations. This project demonstrates advanced econometric techniques including ARIMAX modeling and GARCH volatility forecasting for Bitcoin price prediction.
 
-For the most updated R-based report (including narrative, methodology, and results), see the published document on RPubs: [stock-predict by mee](https://rpubs.com/eloise21/1387325).
+For the most updated R-based report (including narrative, methodology, and results), see the published document on RPubs: [bitcoin-predict by mee](https://rpubs.com/eloise21/1387325).
 
 ## Overview
 
