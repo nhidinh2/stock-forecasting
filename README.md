@@ -27,7 +27,7 @@ This project performs a complete time series analysis workflow on Bitcoin (BTC) 
 ## Project Structure
 
 ```
-stock-forecasting/
+crypto-forecasting/
 ├── archive/                    # Historical cryptocurrency data (CSV files)
 │   ├── bitcoin.csv            # Bitcoin OHLCV data (primary dataset)
 │   ├── ethereum.csv
